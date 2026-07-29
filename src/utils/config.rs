@@ -56,25 +56,33 @@ impl AppConfig {
     fn validate_and_fix(&mut self) {
         // Clamp CPS to safe range (1-1000)
         self.cps.default = self.cps.default.clamp(1, 1000);
-        
+
         // Ensure jitter values are reasonable
         self.click.jitter_min_ms = self.click.jitter_min_ms.clamp(1, 1000);
         self.click.jitter_max_ms = self.click.jitter_max_ms.clamp(1, 1000);
-        
+
         // Ensure jitter_min <= jitter_max
         if self.click.jitter_min_ms > self.click.jitter_max_ms {
             std::mem::swap(&mut self.click.jitter_min_ms, &mut self.click.jitter_max_ms);
         }
-        
+
         // Clamp burst count to reasonable range
         self.click.burst_count = self.click.burst_count.clamp(1, 10000);
-        
+
         // Validate hotkey (reject system-critical keys)
         if !is_valid_hotkey(&self.hotkey.key) {
             tracing::warn!("Invalid hotkey '{}' in config, resetting to F6", self.hotkey.key);
             self.hotkey.key = "F6".to_string();
         }
-        
+
+        // Also reject unsafe system-critical keys (e.g. Esc, Enter, modifiers)
+        if let Ok(code) = crate::system::hotkey::parse_key_code(&self.hotkey.key) {
+            if !crate::system::hotkey::is_safe_key(code) {
+                tracing::warn!("Unsafe hotkey '{}' in config, resetting to F6", self.hotkey.key);
+                self.hotkey.key = "F6".to_string();
+            }
+        }
+
         // Validate mouse button
         if self.click.button != "left" && self.click.button != "right" {
             self.click.button = "left".to_string();
@@ -125,12 +133,12 @@ mod tests {
     #[test]
     fn test_validate_and_fix_cps_bounds() {
         let mut config = AppConfig::default();
-        
+
         // Test upper bound
         config.cps.default = 2000;
         config.validate_and_fix();
         assert_eq!(config.cps.default, 1000);
-        
+
         // Test lower bound
         config.cps.default = 0;
         config.validate_and_fix();
@@ -140,12 +148,12 @@ mod tests {
     #[test]
     fn test_validate_and_fix_jitter_swap() {
         let mut config = AppConfig::default();
-        
+
         // Min > Max should be swapped
         config.click.jitter_min_ms = 100;
         config.click.jitter_max_ms = 10;
         config.validate_and_fix();
-        
+
         assert_eq!(config.click.jitter_min_ms, 10);
         assert_eq!(config.click.jitter_max_ms, 100);
     }
@@ -153,11 +161,11 @@ mod tests {
     #[test]
     fn test_validate_and_fix_jitter_bounds() {
         let mut config = AppConfig::default();
-        
+
         config.click.jitter_min_ms = 2000;
         config.click.jitter_max_ms = 3000;
         config.validate_and_fix();
-        
+
         assert_eq!(config.click.jitter_min_ms, 1000);
         assert_eq!(config.click.jitter_max_ms, 1000);
     }
@@ -165,12 +173,12 @@ mod tests {
     #[test]
     fn test_validate_and_fix_burst_count() {
         let mut config = AppConfig::default();
-        
+
         // Test lower bound
         config.click.burst_count = 0;
         config.validate_and_fix();
         assert_eq!(config.click.burst_count, 1);
-        
+
         // Test upper bound
         config.click.burst_count = 20000;
         config.validate_and_fix();
@@ -180,7 +188,7 @@ mod tests {
     #[test]
     fn test_validate_and_fix_invalid_button() {
         let mut config = AppConfig::default();
-        
+
         config.click.button = "middle".to_string();
         config.validate_and_fix();
         assert_eq!(config.click.button, "left");
@@ -189,7 +197,7 @@ mod tests {
     #[test]
     fn test_validate_and_fix_invalid_hotkey() {
         let mut config = AppConfig::default();
-        
+
         config.hotkey.key = "CTRL+C".to_string();
         config.validate_and_fix();
         assert_eq!(config.hotkey.key, "F6"); // Should reset to default

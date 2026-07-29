@@ -21,6 +21,7 @@ pub struct AppController {
     engine: ClickEngine,
     hotkey: RefCell<HotkeyListener>,
     config: RefCell<AppConfig>,
+    config_dirty: RefCell<bool>,
     running: RefCell<bool>,
     capture_shutdown: RefCell<Option<Arc<AtomicBool>>>,
 }
@@ -36,6 +37,7 @@ impl AppController {
             engine,
             hotkey: RefCell::new(hotkey),
             config: RefCell::new(config),
+            config_dirty: RefCell::new(false),
             running: RefCell::new(false),
             capture_shutdown: RefCell::new(None),
         });
@@ -48,6 +50,18 @@ impl AppController {
         controller.wire_signals(window);
         controller.start_hotkey(&controller.config.borrow().hotkey.key.clone());
         controller.start_stats_poll(window);
+
+        // Debounced config auto-save (500ms idle)
+        {
+            let this = Rc::clone(&controller);
+            glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                if *this.config_dirty.borrow() {
+                    let _ = this.config.borrow().save();
+                    *this.config_dirty.borrow_mut() = false;
+                }
+                glib::ControlFlow::Continue
+            });
+        }
 
         controller
     }
@@ -64,7 +78,7 @@ impl AppController {
                 label.set_text(&format!("{cps} CPS"));
                 this.engine.send(EngineCommand::SetCps(cps));
                 this.config.borrow_mut().cps.default = cps;
-                let _ = this.config.borrow().save();
+                *this.config_dirty.borrow_mut() = true;
             }
         });
 
@@ -111,7 +125,7 @@ impl AppController {
                 let count = row.value() as u32;
                 this.engine.send(EngineCommand::SetBurstCount(count));
                 this.config.borrow_mut().click.burst_count = count;
-                let _ = this.config.borrow().save();
+                *this.config_dirty.borrow_mut() = true;
             }
         });
 
@@ -125,7 +139,7 @@ impl AppController {
                 };
                 this.engine.send(EngineCommand::SetButton(button));
                 this.config.borrow_mut().click.button = button.as_config_str().to_string();
-                let _ = this.config.borrow().save();
+                *this.config_dirty.borrow_mut() = true;
             }
         });
 
@@ -174,10 +188,12 @@ impl AppController {
                     let (tx, rx) = crossbeam_channel::bounded(1);
                     *capture_result_rx.borrow_mut() = Some(rx);
 
-                    thread::spawn(move || {
-                        let result = hotkey::capture_next_key(shutdown);
-                        let _ = tx.send(result);
-                    });
+                    let _ = thread::Builder::new()
+                        .name("hotkey-capture".into())
+                        .spawn(move || {
+                            let result = hotkey::capture_next_key(shutdown);
+                            let _ = tx.send(result);
+                        });
                 }
             }
         });
@@ -226,7 +242,7 @@ impl AppController {
 
                                 // Save to config
                                 this_poll.config.borrow_mut().hotkey.key = key_name.clone();
-                                let _ = this_poll.config.borrow().save();
+                                *this_poll.config_dirty.borrow_mut() = true;
 
                                 // Restart hotkey listener with new key
                                 this_poll.restart_hotkey(&key_name);
@@ -262,7 +278,7 @@ impl AppController {
                     max_ms,
                 });
                 this.config.borrow_mut().click.jitter_enabled = enabled;
-                let _ = this.config.borrow().save();
+                *this.config_dirty.borrow_mut() = true;
             }
         });
 
@@ -285,7 +301,7 @@ impl AppController {
                     let mut cfg = this_min.config.borrow_mut();
                     cfg.click.jitter_min_ms = min_ms;
                     cfg.click.jitter_max_ms = max_ms;
-                    let _ = cfg.save();
+                    *this_min.config_dirty.borrow_mut() = true;
                 });
 
             let this_max = Rc::clone(&this);
@@ -306,7 +322,7 @@ impl AppController {
                     let mut cfg = this_max.config.borrow_mut();
                     cfg.click.jitter_min_ms = min_ms;
                     cfg.click.jitter_max_ms = max_ms;
-                    let _ = cfg.save();
+                    *this_max.config_dirty.borrow_mut() = true;
                 });
         }
     }

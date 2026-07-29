@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Linux auto-clicker with GTK4/libadwaita GUI"
 license = "MIT"
+authors = ["Sirzech <xenonargon30@gmail.com>"]
+repository = "https://github.com/sirzech30/clix"
+homepage = "https://github.com/sirzech30/clix"
+readme = "README.md"
 
 [[bin]]
 name = "clix"
@@ -19,7 +23,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
-evdev = "0.12"
+
 nix = { version = "0.29", features = ["poll", "user"] }
 libc = "0.2"
 thiserror = "2"
@@ -31,43 +35,63 @@ codegen-units = 1
 
 [package.metadata.deb]
 name = "clix"
+maintainer = "Sirzech <xenonargon30@gmail.com>"
+copyright = "© 2026 Sirzech"
 section = "utils"
 priority = "optional"
-assets = [
-    ["target/release/clix", "usr/bin/clix", "755"],
-    ["udev/99-clix-uinput.rules", "usr/lib/udev/rules.d/99-clix-uinput.rules", "644"],
-    ["systemd/clix.service", "usr/lib/systemd/user/clix.service", "644"],
-    ["README.md", "usr/share/doc/clix/README.md", "644"],
-    ["LICENSE", "usr/share/doc/clix/LICENSE", "644"],
-]
+
 depends = [
     "libgtk-4-1",
     "libadwaita-1-0",
     "libc6",
 ]
 
+assets = [
+    ["target/release/clix", "usr/bin/clix", "755"],
+    ["udev/99-clix-uinput.rules", "usr/lib/udev/rules.d/99-clix-uinput.rules", "644"],
+    ["systemd/clix.service", "usr/lib/systemd/user/clix.service", "644"],
+    ["README.md", "usr/share/doc/clix/README.md", "644"],
+    ["LICENSE", "usr/share/doc/clix/LICENSE", "644"],
+    ["icons/hicolor/scalable/apps/clix.svg", "usr/share/icons/hicolor/scalable/apps/clix.svg", "644"],
+]
+
 [package.metadata.generate-rpm]
 name = "clix"
-version = "0.1.0"
-license = "MIT"
 summary = "Linux auto-clicker with GTK4/libadwaita GUI"
-description = "Linux auto-clicker with GTK4/libadwaita GUI"
-url = ""
+license = "MIT"
 group = "Utilities"
-build_requires = [
-    "gtk4-devel",
-    "libadwaita-devel",
-]
-requires = [
-    "gtk4",
-    "libadwaita",
-    "glib2",
-    "libc6",
-]
-assets = [
-    { source = "target/release/clix", dest = "/usr/bin/clix", mode = "755" },
-    { source = "udev/99-clix-uinput.rules", dest = "/usr/lib/udev/rules.d/99-clix-uinput.rules", mode = "644" },
-    { source = "systemd/clix.service", dest = "/usr/lib/systemd/user/clix.service", mode = "644" },
-    { source = "README.md", dest = "/usr/share/doc/clix/README.md", mode = "644" },
-    { source = "LICENSE", dest = "/usr/share/doc/clix/LICENSE", mode = "644" },
-]
+
+[package.metadata.generate-rpm.requires]
+gtk4 = "*"
+libadwaita = "*"
+glib2 = "*"
+glibc = "*"
+
+[package.metadata.generate-rpm.build_requires]
+gtk4-devel = "*"
+libadwaita-devel = "*"
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/clix"
+dest = "/usr/bin/clix"
+mode = "755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "udev/99-clix-uinput.rules"
+dest = "/usr/lib/udev/rules.d/99-clix-uinput.rules"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "systemd/clix.service"
+dest = "/usr/lib/systemd/user/clix.service"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "README.md"
+dest = "/usr/share/doc/clix/README.md"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "LICENSE"
+dest = "/usr/share/doc/clix/LICENSE"
+mode = "644"

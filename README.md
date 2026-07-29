@@ -61,7 +61,7 @@ sudo zypper install rust cargo gtk4-devel libadwaita-devel pkg-config gcc
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/clix.git
+https://github.com/sirzech30/clix.git
 cd clix
 ```
 

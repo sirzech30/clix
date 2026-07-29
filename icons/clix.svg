@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="a" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f1020"/>
+      <stop offset="100%" stop-color="#121a2f"/>
+    </linearGradient>
+    <linearGradient id="e" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff4d6d"/>
+      <stop offset="100%" stop-color="#ff7a6b"/>
+    </linearGradient>
+    <linearGradient id="c" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2b3a67"/>
+      <stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <filter id="b" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000" flood-opacity=".45"/>
+    </filter>
+    <filter id="d" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <circle cx="128" cy="128" r="118" fill="url(#a)" stroke="#1f2a44" stroke-width="3" filter="url(#b)"/>
+  <circle cx="128" cy="128" r="108" fill="none" stroke="url(#c)" stroke-width="2" opacity=".6"/>
+  <g filter="url(#d)" transform="translate(128 128)">
+    <path d="M0-78 28 42H8v30H-8V42h-20Z" fill="url(#e)" stroke="#fff" stroke-opacity=".18" stroke-width="1.2" stroke-linejoin="round"/>
+  </g>
+  <circle cx="128" cy="18" r="2.5" fill="#ff4d6d"/>
+  <circle cx="238" cy="128" r="2.5" fill="#ff4d6d"/>
+  <circle cx="128" cy="238" r="2.5" fill="#ff4d6d"/>
+  <circle cx="18" cy="128" r="2.5" fill="#ff4d6d"/>
+</svg>

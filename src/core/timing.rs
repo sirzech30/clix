@@ -26,9 +26,6 @@ impl TimingEngine {
         self.config = config;
     }
 
-    pub fn update_config(&mut self, config: TimingConfig) {
-        self.config = config;
-    }
 
     /// Schedule the next click deadline relative to now
     pub fn schedule_next(&mut self) -> Instant {
@@ -106,12 +103,12 @@ impl PreciseSleeper {
     pub fn sleep(&mut self, target_interval: Duration) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_tick);
-        
+
         if elapsed < target_interval {
             let sleep_duration = target_interval - elapsed;
             std::thread::sleep(sleep_duration);
         }
-        
+
         self.last_tick = Instant::now();
     }
 
@@ -156,7 +153,7 @@ mod tests {
         for _ in 0..100 {
             let result = apply_jitter(base, min_ms, max_ms);
             let result_ms = result.as_millis();
-            
+
             // Should be between base + min and base + max
             assert!(result_ms >= 55, "result_ms={} should be >= 55", result_ms);
             assert!(result_ms <= 70, "result_ms={} should be <= 70", result_ms);
@@ -167,7 +164,7 @@ mod tests {
     fn test_apply_jitter_zero_range() {
         let base = Duration::from_millis(50);
         let result = apply_jitter(base, 0, 0);
-        
+
         // With 0 jitter, should return base duration
         assert_eq!(result, base);
     }
@@ -176,10 +173,10 @@ mod tests {
     fn test_precise_sleeper_reset() {
         let mut sleeper = PreciseSleeper::new();
         let initial_tick = sleeper.last_tick;
-        
+
         std::thread::sleep(Duration::from_millis(10));
         sleeper.reset();
-        
+
         assert!(sleeper.last_tick > initial_tick);
     }
 
@@ -187,7 +184,7 @@ mod tests {
     fn test_precise_sleeper_default() {
         let sleeper = PreciseSleeper::default();
         let now = Instant::now();
-        
+
         // Should be initialized to approximately now
         let diff = now.duration_since(sleeper.last_tick);
         assert!(diff < Duration::from_millis(10));
@@ -203,12 +200,12 @@ mod tests {
             smoothing_enabled: false,
         };
         let mut timing = TimingEngine::new(config);
-        
+
         // Schedule from a specific deadline
         let base = Instant::now();
         let next = timing.schedule_next_from(base);
         let expected = base + Duration::from_millis(10);
-        
+
         // Should be close to base + interval (within 1ms for test timing)
         let diff = if next > expected {
             next - expected

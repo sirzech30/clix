@@ -67,30 +67,30 @@ impl MainWindow {
         status_box.add_css_class("card");
         status_box.set_margin_top(4);
         status_box.set_margin_bottom(4);
-        
+
         let status_header = Box::new(Orientation::Horizontal, 10);
         status_header.set_margin_top(12);
         status_header.set_margin_bottom(4);
         status_header.set_margin_start(12);
         status_header.set_margin_end(12);
-        
+
         let status_icon_label = Label::new(Some("●"));
         status_icon_label.add_css_class("title-2");
         status_icon_label.add_css_class("error");
-        
+
         let status_label = Label::new(Some("Stopped"));
         status_label.add_css_class("title-3");
         status_label.set_halign(gtk4::Align::Start);
         status_label.set_hexpand(true);
-        
+
         status_header.append(&status_icon_label);
         status_header.append(&status_label);
-        
+
         let live_cps_label = Label::new(Some("Live: 0.0 CPS"));
         live_cps_label.add_css_class("title-4");
         live_cps_label.set_halign(gtk4::Align::Center);
         live_cps_label.set_margin_bottom(12);
-        
+
         status_box.append(&status_header);
         status_box.append(&live_cps_label);
 
@@ -102,10 +102,10 @@ impl MainWindow {
         let cps_adj = Adjustment::new(20.0, 1.0, 1000.0, 1.0, 10.0, 0.0);
         let cps_spin = SpinRow::new(Some(&cps_adj), 1.0, 0);
         cps_spin.set_title("Clicks Per Second");
-        
+
         let cps_value_label = Label::new(Some("20 CPS"));
         cps_value_label.add_css_class("dim-label");
-        
+
         // CPS Quick Presets
         let preset_box = Box::new(Orientation::Horizontal, 6);
         preset_box.set_margin_start(12);
@@ -113,23 +113,23 @@ impl MainWindow {
         preset_box.set_margin_top(4);
         preset_box.set_margin_bottom(8);
         preset_box.set_halign(gtk4::Align::Center);
-        
+
         let preset_label = Label::new(Some("Quick:"));
         preset_label.add_css_class("dim-label");
         preset_box.append(&preset_label);
-        
+
         let preset_10 = Button::with_label("10");
         preset_10.add_css_class("flat");
         preset_box.append(&preset_10);
-        
+
         let preset_20 = Button::with_label("20");
         preset_20.add_css_class("flat");
         preset_box.append(&preset_20);
-        
+
         let preset_50 = Button::with_label("50");
         preset_50.add_css_class("flat");
         preset_box.append(&preset_50);
-        
+
         let preset_100 = Button::with_label("100");
         preset_100.add_css_class("flat");
         preset_box.append(&preset_100);
@@ -157,16 +157,16 @@ impl MainWindow {
         let hotkey_label = Label::new(Some("F6"));
         hotkey_label.set_halign(gtk4::Align::End);
         hotkey_label.add_css_class("dim-label");
-        
+
         let hotkey_btn = Button::new();
         hotkey_btn.set_label("Set Hotkey");
         hotkey_btn.add_css_class("flat");
         hotkey_btn.set_halign(gtk4::Align::End);
-        
+
         let hotkey_box = Box::new(Orientation::Horizontal, 4);
         hotkey_box.append(&hotkey_label);
         hotkey_box.append(&hotkey_btn);
-        
+
         let hotkey_row = ActionRow::new();
         hotkey_row.set_title("Hotkey");
         hotkey_row.add_suffix(&hotkey_box);
@@ -175,7 +175,7 @@ impl MainWindow {
         let jitter_switch = Switch::new();
         jitter_switch.set_active(false);
         jitter_switch.set_valign(gtk4::Align::Center);
-        
+
         let jitter_row_box = libadwaita::ActionRow::new();
         jitter_row_box.set_title("Random Jitter");
         jitter_row_box.add_suffix(&jitter_switch);
@@ -187,7 +187,7 @@ impl MainWindow {
         jitter_timing_box.set_margin_end(12);
         jitter_timing_box.set_margin_top(4);
         jitter_timing_box.set_margin_bottom(4);
-        
+
         let jitter_min_adj = Adjustment::new(5.0, 1.0, 100.0, 1.0, 5.0, 0.0);
         let jitter_min_row = SpinRow::new(Some(&jitter_min_adj), 1.0, 0);
         jitter_min_row.set_title("Min (ms)");
@@ -226,7 +226,7 @@ impl MainWindow {
         // Wrap content in toast overlay for notifications
         let toast_overlay = libadwaita::ToastOverlay::new();
         toast_overlay.set_child(Some(&content));
-        
+
         window.set_child(Some(&toast_overlay));
 
         Self {
@@ -255,54 +255,6 @@ impl MainWindow {
 
     pub fn set_cps_display(&self, cps: u32) {
         self.cps_value_label.set_text(&format!("{cps} CPS"));
-    }
-
-    pub fn set_running_ui(&self, running: bool) {
-        if running {
-            self.status_label.set_text("Running");
-            self.status_label.remove_css_class("dim-label");
-            self.start_stop_btn.set_label("Stop");
-            self.start_stop_btn.remove_css_class("suggested-action");
-            self.start_stop_btn.add_css_class("destructive-action");
-        } else {
-            self.status_label.set_text("Stopped");
-            self.status_label.add_css_class("dim-label");
-            self.start_stop_btn.set_label("Start");
-            self.start_stop_btn.remove_css_class("destructive-action");
-            self.start_stop_btn.add_css_class("suggested-action");
-        }
-    }
-
-    pub fn set_live_cps(&self, cps: f64) {
-        self.live_cps_label
-            .set_text(&format!("Live: {cps:.1} CPS"));
-    }
-
-    pub fn set_burst_visible(&self, visible: bool) {
-        self.burst_row.set_visible(visible);
-    }
-
-    /// Show a toast notification
-    pub fn show_toast(&self, message: &str) {
-        let toast = libadwaita::Toast::new(message);
-        toast.set_timeout(2);
-        self.toast_overlay.add_toast(toast);
-    }
-
-    /// Enter "capture mode" - shows visual feedback that we're waiting for a key
-    pub fn set_capturing(&self, capturing: bool) {
-        if capturing {
-            self.hotkey_btn.set_label("Cancel");
-            self.hotkey_btn.add_css_class("destructive-action");
-            self.hotkey_label.set_text("Press a key...");
-            self.hotkey_label.remove_css_class("dim-label");
-            self.hotkey_label.add_css_class("accent");
-        } else {
-            self.hotkey_btn.set_label("Set Hotkey");
-            self.hotkey_btn.remove_css_class("destructive-action");
-            self.hotkey_label.add_css_class("dim-label");
-            self.hotkey_label.remove_css_class("accent");
-        }
     }
 
     /// Update the displayed hotkey name

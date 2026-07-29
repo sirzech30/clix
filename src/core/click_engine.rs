@@ -3,18 +3,14 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 
 use crate::backend::{MouseButton, VirtualMouse};
 use crate::core::scheduler::{ClickMode, RunState, Scheduler};
 use crate::core::timing::{TimingConfig, TimingEngine};
 use crate::system::hotkey::HotkeyEvent;
 
-/// Minimum interval where we can safely use OS sleep + spin hybrid.
-/// Below this, we pure-spin to avoid Linux scheduler tick imprecision (~4ms).
-const HYBRID_THRESHOLD_MS: u64 = 20; // 50 CPS
-/// How long to spin after sleeping before the deadline
-const SPIN_WINDOW_MS: u64 = 5;
+const MIN_STATS_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Debug, Clone)]
 pub enum EngineCommand {
@@ -142,6 +138,7 @@ fn engine_loop(
     let mut click_window_idx: usize = 0;
     let mut deadline: Option<Instant> = None;
     let mut hotkey_rx: Option<Receiver<HotkeyEvent>> = None;
+    let mut last_stats_emit = Instant::now() - MIN_STATS_INTERVAL;
 
     emit_stats(
         &stats_tx,
@@ -150,6 +147,7 @@ fn engine_loop(
         &settings,
         total_clicks,
         &click_window,
+        &mut last_stats_emit,
     );
 
     while !shutdown.load(Ordering::SeqCst) {
@@ -171,6 +169,7 @@ fn engine_loop(
                     &settings,
                     total_clicks,
                     &click_window,
+                    &mut last_stats_emit,
                 );
             }
         }
@@ -178,7 +177,7 @@ fn engine_loop(
         if scheduler.state() == RunState::Running {
             if let Some(dl) = deadline {
                 // Wait precisely until the deadline
-                wait_until_deadline(dl, &cmd_rx, &shutdown);
+                wait_until_deadline(dl, &shutdown);
 
                 // Check if shutdown was requested during wait
                 if shutdown.load(Ordering::SeqCst) {
@@ -203,6 +202,7 @@ fn engine_loop(
                         &settings,
                         total_clicks,
                         &click_window,
+                        &mut last_stats_emit,
                     );
                     continue;
                 }
@@ -241,6 +241,7 @@ fn engine_loop(
                     &settings,
                     total_clicks,
                     &click_window,
+                    &mut last_stats_emit,
                 );
             } else {
                 // Running but no deadline set - shouldn't happen, but recover
@@ -248,104 +249,92 @@ fn engine_loop(
                 deadline = Some(timing.schedule_next());
             }
         } else {
-            // Not running - just wait for commands
-            // Use a longer poll interval when idle
-            let poll_deadline = Instant::now() + Duration::from_millis(10);
-            while Instant::now() < poll_deadline {
-                match cmd_rx.try_recv() {
-                    Ok(EngineCommand::Shutdown) => break,
-                    Ok(cmd) => {
-                        apply_command(
-                            cmd,
-                            &mut settings,
-                            &mut scheduler,
-                            &mut timing,
-                            &mut mouse,
-                            &mut deadline,
-                            &mut hotkey_rx,
-                        );
-                        emit_stats(
-                            &stats_tx,
-                            &scheduler,
-                            &mouse,
-                            &settings,
-                            total_clicks,
-                            &click_window,
-                        );
-                    }
-                    Err(crossbeam_channel::TryRecvError::Empty) => {
-                        std::hint::spin_loop();
-                    }
-                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            // Not running — block until a command arrives or we need to emit stats
+            match safe_recv_timeout(&cmd_rx, Duration::from_millis(100)) {
+                Ok(EngineCommand::Shutdown) => break,
+                Ok(cmd) => {
+                    apply_command(
+                        cmd,
+                        &mut settings,
+                        &mut scheduler,
+                        &mut timing,
+                        &mut mouse,
+                        &mut deadline,
+                        &mut hotkey_rx,
+                    );
+                    emit_stats(
+                        &stats_tx,
+                        &scheduler,
+                        &mouse,
+                        &settings,
+                        total_clicks,
+                        &click_window,
+                        &mut last_stats_emit,
+                    );
                 }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    // Periodic stats emission keeps UI alive while idle
+                    emit_stats(
+                        &stats_tx,
+                        &scheduler,
+                        &mouse,
+                        &settings,
+                        total_clicks,
+                        &click_window,
+                        &mut last_stats_emit,
+                    );
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         }
     }
 }
 
-/// Wait precisely until the given deadline.
-/// Uses a hybrid approach: OS sleep for most of the wait when the remaining
-/// time is large enough, then busy-spin for the last few ms for precision.
-/// For short waits (< HYBRID_THRESHOLD_MS), pure-spin to avoid Linux's
-/// coarse scheduler tick (~4ms on most distros) from blowing the budget.
+/// A safe replacement for crossbeam-channel 0.5's broken `recv_timeout`.
+/// crossbeam-channel 0.5 internally uses `thread::park_timeout()` for blocking,
+/// but a stale park-permit bug causes it to spin at 100% CPU instead of sleeping.
+/// This function uses `thread::sleep()` which properly blocks on Linux.
+fn safe_recv_timeout<T>(
+    rx: &Receiver<T>,
+    timeout: Duration,
+) -> Result<T, RecvTimeoutError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => return Ok(msg),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(RecvTimeoutError::Timeout);
+        }
+
+        // Sleep in chunks to keep responsiveness reasonable.
+        let remaining = deadline - now;
+        let sleep_dur = std::cmp::min(remaining, Duration::from_millis(10));
+        std::thread::sleep(sleep_dur);
+    }
+}
+
+/// Wait until the given deadline using OS-level sleep.
+/// Uses `std::thread::sleep()` in chunks (max 50ms) for proper blocking (0% CPU),
+/// checking the shutdown flag between chunks for responsiveness.
 fn wait_until_deadline(
     dl: Instant,
-    cmd_rx: &Receiver<EngineCommand>,
     shutdown: &AtomicBool,
 ) {
     loop {
-        let now = Instant::now();
-        if now >= dl {
+        if shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let remaining = dl - now;
-        let remaining_ms = remaining.as_millis() as u64;
-
-        if remaining_ms >= HYBRID_THRESHOLD_MS {
-            // We have enough time to sleep + spin safely
-            let spin = Duration::from_millis(SPIN_WINDOW_MS);
-            let sleep_for = remaining - spin;
-
-            // Use recv_timeout as our sleep mechanism so we can also
-            // catch command/shutdown signals while sleeping
-            match cmd_rx.recv_timeout(sleep_for) {
-                Ok(EngineCommand::Shutdown) => {
-                    shutdown.store(true, Ordering::SeqCst);
-                    return;
-                }
-                Ok(_cmd) => {
-                    // Don't process commands here to avoid recursive processing;
-                    // they'll be picked up by the drain after wait returns.
-                    // Just continue the wait.
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    // Sleep completed normally
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    shutdown.store(true, Ordering::SeqCst);
-                    return;
-                }
-            }
-            // Fall through to spin after sleep
+        let remaining = dl.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
         }
-        // Pure busy-spin: this gives microsecond precision regardless of
-        // the OS scheduler tick granularity
-        while Instant::now() < dl {
-            // Periodically check for commands/shutdown during spin
-            // to remain responsive
-            match cmd_rx.try_recv() {
-                Ok(EngineCommand::Shutdown) => {
-                    shutdown.store(true, Ordering::SeqCst);
-                    return;
-                }
-                Ok(_cmd) => {
-                    // Command received but deferred; continue spinning
-                }
-                _ => {}
-            }
-            std::hint::spin_loop();
-        }
-        return;
+        let chunk = std::cmp::min(remaining, Duration::from_millis(50));
+        std::thread::sleep(chunk);
     }
 }
 
@@ -474,7 +463,14 @@ fn emit_stats(
     settings: &EngineSettings,
     total_clicks: u64,
     click_window: &[Option<Instant>],
+    last_stats_emit: &mut Instant,
 ) {
+    let now = Instant::now();
+    if now - *last_stats_emit < MIN_STATS_INTERVAL {
+        return;
+    }
+    *last_stats_emit = now;
+
     let _ = stats_tx.send(EngineStats {
         running: scheduler.state() == RunState::Running,
         total_clicks,
