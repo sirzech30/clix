@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use crossbeam_channel::Receiver;
@@ -17,8 +17,10 @@ use crate::utils::config::AppConfig;
 
 use super::window::MainWindow;
 
+type CaptureResultRx = Rc<RefCell<Option<Receiver<Result<u16, String>>>>>;
+
 pub struct AppController {
-    engine: ClickEngine,
+    engine: RefCell<ClickEngine>,
     hotkey: RefCell<HotkeyListener>,
     config: RefCell<AppConfig>,
     config_dirty: RefCell<bool>,
@@ -34,7 +36,7 @@ impl AppController {
         hotkey: HotkeyListener,
     ) -> Rc<Self> {
         let controller = Rc::new(Self {
-            engine,
+            engine: RefCell::new(engine),
             hotkey: RefCell::new(hotkey),
             config: RefCell::new(config),
             config_dirty: RefCell::new(false),
@@ -56,7 +58,9 @@ impl AppController {
             let this = Rc::clone(&controller);
             glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
                 if *this.config_dirty.borrow() {
-                    let _ = this.config.borrow().save();
+                    if let Err(e) = this.config.borrow().save() {
+                        tracing::warn!("Failed to save config: {e}");
+                    }
                     *this.config_dirty.borrow_mut() = false;
                 }
                 glib::ControlFlow::Continue
@@ -64,6 +68,20 @@ impl AppController {
         }
 
         controller
+    }
+
+    pub fn shutdown(&self) {
+        if let Some(flag) = self.capture_shutdown.borrow_mut().take() {
+            flag.store(true, Ordering::SeqCst);
+        }
+        if *self.config_dirty.borrow() {
+            if let Err(e) = self.config.borrow().save() {
+                tracing::warn!("Failed to save config on shutdown: {e}");
+            }
+            *self.config_dirty.borrow_mut() = false;
+        }
+        self.hotkey.borrow_mut().stop();
+        self.engine.borrow_mut().shutdown();
     }
 
     fn wire_signals(self: &Rc<Self>, window: &MainWindow) {
@@ -76,7 +94,7 @@ impl AppController {
             move |spin, _| {
                 let cps = spin.value().round() as u32;
                 label.set_text(&format!("{cps} CPS"));
-                this.engine.send(EngineCommand::SetCps(cps));
+                this.engine.borrow().send(EngineCommand::SetCps(cps));
                 this.config.borrow_mut().cps.default = cps;
                 *this.config_dirty.borrow_mut() = true;
             }
@@ -101,9 +119,9 @@ impl AppController {
             move |_| {
                 let running = *this.running.borrow();
                 if running {
-                    this.engine.send(EngineCommand::Stop);
+                    this.engine.borrow().send(EngineCommand::Stop);
                 } else {
-                    this.engine.send(EngineCommand::Start);
+                    this.engine.borrow().send(EngineCommand::Start);
                 }
             }
         });
@@ -115,7 +133,9 @@ impl AppController {
                 let idx = row.selected();
                 let mode = ClickMode::from_index(idx);
                 burst_row.set_visible(mode == ClickMode::Burst);
-                this.engine.send(EngineCommand::SetMode(mode));
+                this.engine.borrow().send(EngineCommand::SetMode(mode));
+                this.config.borrow_mut().click.mode = mode.label().to_ascii_lowercase();
+                *this.config_dirty.borrow_mut() = true;
             }
         });
 
@@ -123,7 +143,9 @@ impl AppController {
             let this = Rc::clone(&this);
             move |row, _| {
                 let count = row.value() as u32;
-                this.engine.send(EngineCommand::SetBurstCount(count));
+                this.engine
+                    .borrow()
+                    .send(EngineCommand::SetBurstCount(count));
                 this.config.borrow_mut().click.burst_count = count;
                 *this.config_dirty.borrow_mut() = true;
             }
@@ -137,7 +159,7 @@ impl AppController {
                 } else {
                     MouseButton::Left
                 };
-                this.engine.send(EngineCommand::SetButton(button));
+                this.engine.borrow().send(EngineCommand::SetButton(button));
                 this.config.borrow_mut().click.button = button.as_config_str().to_string();
                 *this.config_dirty.borrow_mut() = true;
             }
@@ -150,8 +172,7 @@ impl AppController {
         let hk_label = window.hotkey_label.clone();
         let toast = window.toast_overlay.clone();
 
-        let capture_result_rx: Rc<RefCell<Option<Receiver<Result<u16, String>>>>> =
-            Rc::new(RefCell::new(None));
+        let capture_result_rx: CaptureResultRx = Rc::new(RefCell::new(None));
 
         hk_btn.connect_clicked({
             let this = Rc::clone(&this);
@@ -201,130 +222,73 @@ impl AppController {
         // Poll for capture results from the main thread
         let this_poll = Rc::clone(&this);
         let cap_rx = Rc::clone(&capture_result_rx);
-        glib::timeout_add_local(
-            std::time::Duration::from_millis(50),
-            move || {
-                if let Some(rx) = cap_rx.borrow_mut().as_ref() {
-                    if let Ok(result) = rx.try_recv() {
-                        let hk_label = hk_label.clone();
-                        let hk_btn = hk_btn.clone();
-                        let toast = toast.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            if let Some(rx) = cap_rx.borrow_mut().as_ref()
+                && let Ok(result) = rx.try_recv()
+            {
+                let hk_label = hk_label.clone();
+                let hk_btn = hk_btn.clone();
+                let toast = toast.clone();
 
-                        match result {
-                            Ok(key_code) => {
-                                if !hotkey::is_safe_key(key_code) {
-                                    let name = hotkey::key_code_to_name(key_code);
-                                    hk_label.set_text(&name);
-                                    hk_btn.set_label("Set Hotkey");
-                                    hk_btn.remove_css_class("destructive-action");
-                                    hk_label.add_css_class("dim-label");
-                                    hk_label.remove_css_class("accent");
-                                    let t = libadwaita::Toast::new(&format!(
-                                        "{name} is not allowed as a hotkey"
-                                    ));
-                                    t.set_timeout(2);
-                                    toast.add_toast(t);
-                                    *this_poll.capture_shutdown.borrow_mut() = None;
-                                    return glib::ControlFlow::Continue;
-                                }
-
-                                let key_name = hotkey::key_code_to_name(key_code);
-                                hk_label.set_text(&key_name);
-                                hk_btn.set_label("Set Hotkey");
-                                hk_btn.remove_css_class("destructive-action");
-                                hk_label.add_css_class("dim-label");
-                                hk_label.remove_css_class("accent");
-                                let t = libadwaita::Toast::new(&format!(
-                                    "Hotkey set to {key_name}"
-                                ));
-                                t.set_timeout(2);
-                                toast.add_toast(t);
-
-                                // Save to config
-                                this_poll.config.borrow_mut().hotkey.key = key_name.clone();
-                                *this_poll.config_dirty.borrow_mut() = true;
-
-                                // Restart hotkey listener with new key
-                                this_poll.restart_hotkey(&key_name);
-
-                                *this_poll.capture_shutdown.borrow_mut() = None;
-                            }
-                            Err(_) => {
-                                // Capture was cancelled or failed
-                                hk_btn.set_label("Set Hotkey");
-                                hk_btn.remove_css_class("destructive-action");
-                                hk_label.add_css_class("dim-label");
-                                hk_label.remove_css_class("accent");
-                                *this_poll.capture_shutdown.borrow_mut() = None;
-                            }
+                match result {
+                    Ok(key_code) => {
+                        if !hotkey::is_safe_key(key_code) {
+                            let name = hotkey::key_code_to_name(key_code);
+                            hk_label.set_text(&name);
+                            hk_btn.set_label("Set Hotkey");
+                            hk_btn.remove_css_class("destructive-action");
+                            hk_label.add_css_class("dim-label");
+                            hk_label.remove_css_class("accent");
+                            let t = libadwaita::Toast::new(&format!(
+                                "{name} is not allowed as a hotkey"
+                            ));
+                            t.set_timeout(2);
+                            toast.add_toast(t);
+                            *this_poll.capture_shutdown.borrow_mut() = None;
+                            return glib::ControlFlow::Continue;
                         }
+
+                        let key_name = hotkey::key_code_to_name(key_code);
+                        hk_label.set_text(&key_name);
+                        hk_btn.set_label("Set Hotkey");
+                        hk_btn.remove_css_class("destructive-action");
+                        hk_label.add_css_class("dim-label");
+                        hk_label.remove_css_class("accent");
+                        let t = libadwaita::Toast::new(&format!("Hotkey set to {key_name}"));
+                        t.set_timeout(2);
+                        toast.add_toast(t);
+
+                        // Save to config
+                        this_poll.config.borrow_mut().hotkey.key = key_name.clone();
+                        *this_poll.config_dirty.borrow_mut() = true;
+
+                        // Restart hotkey listener with new key
+                        this_poll.restart_hotkey(&key_name);
+
+                        *this_poll.capture_shutdown.borrow_mut() = None;
+                    }
+                    Err(_) => {
+                        // Capture was cancelled or failed
+                        hk_btn.set_label("Set Hotkey");
+                        hk_btn.remove_css_class("destructive-action");
+                        hk_label.add_css_class("dim-label");
+                        hk_label.remove_css_class("accent");
+                        *this_poll.capture_shutdown.borrow_mut() = None;
                     }
                 }
-                glib::ControlFlow::Continue
-            },
-        );
+            }
+            glib::ControlFlow::Continue
+        });
 
         window.jitter_switch.connect_active_notify({
             let this = Rc::clone(&this);
-            let min_row = window.jitter_min_row.clone();
-            let max_row = window.jitter_max_row.clone();
             move |sw| {
                 let enabled = sw.is_active();
-                let min_ms = min_row.value() as u32;
-                let max_ms = max_row.value() as u32;
-                this.engine.send(EngineCommand::SetJitter {
-                    enabled,
-                    min_ms,
-                    max_ms,
-                });
+                this.engine.borrow().send(EngineCommand::SetJitter(enabled));
                 this.config.borrow_mut().click.jitter_enabled = enabled;
                 *this.config_dirty.borrow_mut() = true;
             }
         });
-
-        {
-            let this_min = Rc::clone(&this);
-            let sw_min = window.jitter_switch.clone();
-            let min_row = window.jitter_min_row.clone();
-            let max_row = window.jitter_max_row.clone();
-            window
-                .jitter_min_row
-                .connect_notify_local(Some("value"), move |_, _| {
-                    let enabled = sw_min.is_active();
-                    let min_ms = min_row.value() as u32;
-                    let max_ms = max_row.value() as u32;
-                    this_min.engine.send(EngineCommand::SetJitter {
-                        enabled,
-                        min_ms,
-                        max_ms,
-                    });
-                    let mut cfg = this_min.config.borrow_mut();
-                    cfg.click.jitter_min_ms = min_ms;
-                    cfg.click.jitter_max_ms = max_ms;
-                    *this_min.config_dirty.borrow_mut() = true;
-                });
-
-            let this_max = Rc::clone(&this);
-            let sw_max = window.jitter_switch.clone();
-            let min_row2 = window.jitter_min_row.clone();
-            let max_row2 = window.jitter_max_row.clone();
-            window
-                .jitter_max_row
-                .connect_notify_local(Some("value"), move |_, _| {
-                    let enabled = sw_max.is_active();
-                    let min_ms = min_row2.value() as u32;
-                    let max_ms = max_row2.value() as u32;
-                    this_max.engine.send(EngineCommand::SetJitter {
-                        enabled,
-                        min_ms,
-                        max_ms,
-                    });
-                    let mut cfg = this_max.config.borrow_mut();
-                    cfg.click.jitter_min_ms = min_ms;
-                    cfg.click.jitter_max_ms = max_ms;
-                    *this_max.config_dirty.borrow_mut() = true;
-                });
-        }
     }
 
     fn start_hotkey(self: &Rc<Self>, key: &str) {
@@ -334,7 +298,7 @@ impl AppController {
             Ok(()) => {
                 tracing::info!("hotkey listener started for key {key}");
                 let rx = hotkey.event_receiver();
-                self.engine.send(EngineCommand::AttachHotkey(rx));
+                self.engine.borrow().send(EngineCommand::AttachHotkey(rx));
             }
             Err(e) => {
                 tracing::error!("failed to start hotkey listener: {e}");
@@ -350,7 +314,7 @@ impl AppController {
             Ok(()) => {
                 tracing::info!("hotkey listener restarted for key {key}");
                 let rx = hotkey.event_receiver();
-                self.engine.send(EngineCommand::AttachHotkey(rx));
+                self.engine.borrow().send(EngineCommand::AttachHotkey(rx));
             }
             Err(e) => {
                 tracing::error!("failed to restart hotkey listener: {e}");
@@ -361,17 +325,30 @@ impl AppController {
     fn start_stats_poll(self: &Rc<Self>, window: &MainWindow) {
         let this = Rc::clone(self);
         let live_cps_label = window.live_cps_label.clone();
+        let total_clicks_label = window.total_clicks_label.clone();
         let status_label = window.status_label.clone();
         let start_stop_btn = window.start_stop_btn.clone();
         let status_icon = window.status_icon.clone();
+        let toast_overlay = window.toast_overlay.clone();
         let last_running = Rc::new(RefCell::new(false));
+        let last_device_error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-            if let Some(stats) = this.engine.try_recv_stats() {
+            if let Some(stats) = this.engine.borrow().try_recv_stats() {
                 let is_running = stats.running;
                 let was_running = *last_running.borrow();
 
                 live_cps_label.set_text(&format!("Live: {:.1} CPS", stats.live_cps));
+                total_clicks_label.set_text(&format!("Clicks: {}", stats.total_clicks));
+
+                if stats.device_error != *last_device_error.borrow() {
+                    if let Some(ref err) = stats.device_error {
+                        let t = libadwaita::Toast::new(&format!("Device error: {err}"));
+                        t.set_timeout(4);
+                        toast_overlay.add_toast(t);
+                    }
+                    *last_device_error.borrow_mut() = stats.device_error.clone();
+                }
 
                 // Only update UI state when it actually changes
                 if is_running != was_running {
@@ -402,15 +379,20 @@ impl AppController {
     }
 }
 
+pub fn mode_from_config(mode: &str) -> ClickMode {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "hold" => ClickMode::Hold,
+        "burst" => ClickMode::Burst,
+        _ => ClickMode::Toggle,
+    }
+}
+
 pub fn engine_settings_from_config(config: &AppConfig) -> EngineSettings {
     EngineSettings {
         cps: config.cps.default,
-        mode: ClickMode::Toggle,
+        mode: mode_from_config(&config.click.mode),
         button: MouseButton::from_config(&config.click.button),
         burst_count: config.click.burst_count,
         jitter_enabled: config.click.jitter_enabled,
-        jitter_min_ms: config.click.jitter_min_ms,
-        jitter_max_ms: config.click.jitter_max_ms,
-        smoothing_enabled: false,
     }
 }

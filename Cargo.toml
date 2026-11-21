@@ -49,10 +49,12 @@ depends = [
 assets = [
     ["target/release/clix", "usr/bin/clix", "755"],
     ["udev/99-clix-uinput.rules", "usr/lib/udev/rules.d/99-clix-uinput.rules", "644"],
+    ["udev/clix-uinput.conf", "usr/lib/modules-load.d/clix-uinput.conf", "644"],
     ["systemd/clix.service", "usr/lib/systemd/user/clix.service", "644"],
     ["README.md", "usr/share/doc/clix/README.md", "644"],
     ["LICENSE", "usr/share/doc/clix/LICENSE", "644"],
-    ["icons/hicolor/scalable/apps/clix.svg", "usr/share/icons/hicolor/scalable/apps/clix.svg", "644"],
+    ["icons/clix.svg", "usr/share/icons/hicolor/scalable/apps/clix.svg", "644"],
+    ["desktop/clix.desktop", "usr/share/applications/clix.desktop", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -82,6 +84,11 @@ dest = "/usr/lib/udev/rules.d/99-clix-uinput.rules"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]
+source = "udev/clix-uinput.conf"
+dest = "/usr/lib/modules-load.d/clix-uinput.conf"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
 source = "systemd/clix.service"
 dest = "/usr/lib/systemd/user/clix.service"
 mode = "644"
@@ -94,4 +101,14 @@ mode = "644"
 [[package.metadata.generate-rpm.assets]]
 source = "LICENSE"
 dest = "/usr/share/doc/clix/LICENSE"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "icons/clix.svg"
+dest = "/usr/share/icons/hicolor/scalable/apps/clix.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "desktop/clix.desktop"
+dest = "/usr/share/applications/clix.desktop"
 mode = "644"

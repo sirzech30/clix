@@ -206,10 +206,10 @@ mod tests {
     #[test]
     fn test_hold_mode_press_and_release() {
         let mut s = Scheduler::new(ClickMode::Hold, 10);
-        
+
         s.on_hotkey(HotkeyAction::Press);
         assert_eq!(s.state(), RunState::Running);
-        
+
         s.on_hotkey(HotkeyAction::Release);
         assert_eq!(s.state(), RunState::Stopped);
     }
@@ -219,13 +219,13 @@ mod tests {
         let mut s = Scheduler::new(ClickMode::Burst, 3);
         s.on_hotkey(HotkeyAction::Press);
         assert_eq!(s.state(), RunState::Running);
-        
+
         assert!(s.on_click_fired()); // 1
         assert_eq!(s.state(), RunState::Running);
-        
+
         assert!(s.on_click_fired()); // 2
         assert_eq!(s.state(), RunState::Running);
-        
+
         assert!(s.on_click_fired()); // 3
         assert_eq!(s.state(), RunState::Stopped); // Should stop after burst
     }
@@ -244,7 +244,7 @@ mod tests {
         let mut s = Scheduler::new(ClickMode::Toggle, 10);
         s.start();
         assert_eq!(s.state(), RunState::Running);
-        
+
         s.set_mode(ClickMode::Hold);
         assert_eq!(s.state(), RunState::Stopped); // Should reset
         assert_eq!(s.mode(), ClickMode::Hold);
@@ -255,7 +255,7 @@ mod tests {
         let mut s = Scheduler::new(ClickMode::Burst, 5);
         s.set_burst_count(10);
         s.start();
-        
+
         for _ in 0..10 {
             assert!(s.on_click_fired());
         }
@@ -267,10 +267,10 @@ mod tests {
         let mut s = Scheduler::new(ClickMode::Burst, 10);
         s.start();
         assert!(s.on_click_fired());
-        
+
         s.stop();
         assert_eq!(s.state(), RunState::Stopped);
-        
+
         // After stop, on_click_fired should return false
         assert!(!s.on_click_fired());
     }
@@ -308,13 +308,13 @@ mod tests {
     #[test]
     fn test_multiple_burst_activations() {
         let mut s = Scheduler::new(ClickMode::Burst, 2);
-        
+
         // First burst
         s.start();
         assert!(s.on_click_fired());
         assert!(s.on_click_fired());
         assert_eq!(s.state(), RunState::Stopped);
-        
+
         // Second burst
         s.start();
         assert!(s.on_click_fired());

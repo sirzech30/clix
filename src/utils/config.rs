@@ -1,7 +1,17 @@
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("config I/O error: {0}")]
+    Io(#[from] io::Error),
+    #[error("config serialization error: {0}")]
+    Serialize(#[from] toml::ser::Error),
+}
 
 const DEFAULT_CONFIG: &str = include_str!("../../config/default.toml");
 
@@ -19,10 +29,9 @@ pub struct CpsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClickConfig {
+    pub mode: String,
     pub button: String,
     pub jitter_enabled: bool,
-    pub jitter_min_ms: u32,
-    pub jitter_max_ms: u32,
     pub burst_count: u32,
 }
 
@@ -40,14 +49,13 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn load() -> Self {
         let path = config_path();
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(mut cfg) = toml::from_str::<AppConfig>(&content) {
-                    // Validate and sanitize loaded config
-                    cfg.validate_and_fix();
-                    return cfg;
-                }
-            }
+        if path.exists()
+            && let Ok(content) = fs::read_to_string(&path)
+            && let Ok(mut cfg) = toml::from_str::<AppConfig>(&content)
+        {
+            // Validate and sanitize loaded config
+            cfg.validate_and_fix();
+            return cfg;
         }
         AppConfig::default()
     }
@@ -57,31 +65,35 @@ impl AppConfig {
         // Clamp CPS to safe range (1-1000)
         self.cps.default = self.cps.default.clamp(1, 1000);
 
-        // Ensure jitter values are reasonable
-        self.click.jitter_min_ms = self.click.jitter_min_ms.clamp(1, 1000);
-        self.click.jitter_max_ms = self.click.jitter_max_ms.clamp(1, 1000);
-
-        // Ensure jitter_min <= jitter_max
-        if self.click.jitter_min_ms > self.click.jitter_max_ms {
-            std::mem::swap(&mut self.click.jitter_min_ms, &mut self.click.jitter_max_ms);
-        }
-
         // Clamp burst count to reasonable range
         self.click.burst_count = self.click.burst_count.clamp(1, 10000);
 
         // Validate hotkey (reject system-critical keys)
         if !is_valid_hotkey(&self.hotkey.key) {
-            tracing::warn!("Invalid hotkey '{}' in config, resetting to F6", self.hotkey.key);
+            tracing::warn!(
+                "Invalid hotkey '{}' in config, resetting to F6",
+                self.hotkey.key
+            );
             self.hotkey.key = "F6".to_string();
         }
 
         // Also reject unsafe system-critical keys (e.g. Esc, Enter, modifiers)
-        if let Ok(code) = crate::system::hotkey::parse_key_code(&self.hotkey.key) {
-            if !crate::system::hotkey::is_safe_key(code) {
-                tracing::warn!("Unsafe hotkey '{}' in config, resetting to F6", self.hotkey.key);
-                self.hotkey.key = "F6".to_string();
-            }
+        if let Ok(code) = crate::system::hotkey::parse_key_code(&self.hotkey.key)
+            && !crate::system::hotkey::is_safe_key(code)
+        {
+            tracing::warn!(
+                "Unsafe hotkey '{}' in config, resetting to F6",
+                self.hotkey.key
+            );
+            self.hotkey.key = "F6".to_string();
         }
+
+        // Validate click mode
+        let normalized_mode = self.click.mode.trim().to_ascii_lowercase();
+        self.click.mode = match normalized_mode.as_str() {
+            "toggle" | "hold" | "burst" => normalized_mode,
+            _ => "toggle".to_string(),
+        };
 
         // Validate mouse button
         if self.click.button != "left" && self.click.button != "right" {
@@ -89,13 +101,14 @@ impl AppConfig {
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn save(&self) -> Result<(), ConfigError> {
         let path = config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            fs::create_dir_all(parent)?;
         }
-        let content = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(path, content).map_err(|e| e.to_string())
+        let content = toml::to_string_pretty(self)?;
+        fs::write(path, content)?;
+        Ok(())
     }
 }
 
@@ -122,10 +135,9 @@ mod tests {
     fn test_default_config_values() {
         let config = AppConfig::default();
         assert_eq!(config.cps.default, 20);
+        assert_eq!(config.click.mode, "toggle");
         assert_eq!(config.click.button, "left");
         assert!(!config.click.jitter_enabled);
-        assert_eq!(config.click.jitter_min_ms, 5);
-        assert_eq!(config.click.jitter_max_ms, 20);
         assert_eq!(config.click.burst_count, 10);
         assert_eq!(config.hotkey.key, "F6");
     }
@@ -143,31 +155,6 @@ mod tests {
         config.cps.default = 0;
         config.validate_and_fix();
         assert_eq!(config.cps.default, 1);
-    }
-
-    #[test]
-    fn test_validate_and_fix_jitter_swap() {
-        let mut config = AppConfig::default();
-
-        // Min > Max should be swapped
-        config.click.jitter_min_ms = 100;
-        config.click.jitter_max_ms = 10;
-        config.validate_and_fix();
-
-        assert_eq!(config.click.jitter_min_ms, 10);
-        assert_eq!(config.click.jitter_max_ms, 100);
-    }
-
-    #[test]
-    fn test_validate_and_fix_jitter_bounds() {
-        let mut config = AppConfig::default();
-
-        config.click.jitter_min_ms = 2000;
-        config.click.jitter_max_ms = 3000;
-        config.validate_and_fix();
-
-        assert_eq!(config.click.jitter_min_ms, 1000);
-        assert_eq!(config.click.jitter_max_ms, 1000);
     }
 
     #[test]
@@ -254,5 +241,17 @@ mod tests {
         let path = config_path();
         assert!(path.to_string_lossy().contains("clix"));
         assert!(path.to_string_lossy().ends_with("config.toml"));
+    }
+
+    #[test]
+    fn test_validate_and_fix_mode() {
+        let mut cfg = AppConfig::default();
+        cfg.click.mode = "HOLD".to_string();
+        cfg.validate_and_fix();
+        assert_eq!(cfg.click.mode, "hold");
+
+        cfg.click.mode = "invalid".to_string();
+        cfg.validate_and_fix();
+        assert_eq!(cfg.click.mode, "toggle");
     }
 }

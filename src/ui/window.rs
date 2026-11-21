@@ -1,6 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{
-    Adjustment, ApplicationWindow, Box, Button, Label, Orientation, Switch,
+    Adjustment, ApplicationWindow, Box, Button, Label, Orientation, PolicyType, ScrolledWindow,
+    Switch,
 };
 use libadwaita::prelude::*;
 use libadwaita::{ActionRow, ComboRow, HeaderBar, PreferencesGroup, SpinRow};
@@ -19,12 +20,11 @@ pub struct MainWindow {
     pub status_label: Label,
     pub status_icon: Label,
     pub live_cps_label: Label,
+    pub total_clicks_label: Label,
     pub mode_row: ComboRow,
     pub burst_row: SpinRow,
     pub button_row: ComboRow,
     pub jitter_switch: Switch,
-    pub jitter_min_row: SpinRow,
-    pub jitter_max_row: SpinRow,
     pub hotkey_btn: Button,
     pub hotkey_label: Label,
     pub toast_overlay: libadwaita::ToastOverlay,
@@ -36,8 +36,8 @@ impl MainWindow {
             .application(app)
             .title("Clix")
             .default_width(420)
-            .default_height(580)
-            .resizable(false)
+            .default_height(600)
+            .resizable(true)
             .build();
 
         let header = HeaderBar::builder()
@@ -62,7 +62,6 @@ impl MainWindow {
             content.append(&permission_banner);
         }
 
-        // ── Status Card (Compact) ──
         let status_box = Box::new(Orientation::Vertical, 4);
         status_box.add_css_class("card");
         status_box.set_margin_top(4);
@@ -89,12 +88,18 @@ impl MainWindow {
         let live_cps_label = Label::new(Some("Live: 0.0 CPS"));
         live_cps_label.add_css_class("title-4");
         live_cps_label.set_halign(gtk4::Align::Center);
-        live_cps_label.set_margin_bottom(12);
+        live_cps_label.set_margin_bottom(2);
+
+        let total_clicks_label = Label::new(Some("Clicks: 0"));
+        total_clicks_label.add_css_class("dim-label");
+        total_clicks_label.add_css_class("caption");
+        total_clicks_label.set_halign(gtk4::Align::Center);
+        total_clicks_label.set_margin_bottom(10);
 
         status_box.append(&status_header);
         status_box.append(&live_cps_label);
+        status_box.append(&total_clicks_label);
 
-        // ── Main Settings Groups ──
         let settings_group = PreferencesGroup::new();
         settings_group.set_margin_top(4);
 
@@ -178,25 +183,9 @@ impl MainWindow {
 
         let jitter_row_box = libadwaita::ActionRow::new();
         jitter_row_box.set_title("Random Jitter");
+        jitter_row_box.set_subtitle("Adds ±15% timing variation between clicks");
         jitter_row_box.add_suffix(&jitter_switch);
         jitter_row_box.set_activatable_widget(Some(&jitter_switch));
-
-        // Jitter timing (compact - inline)
-        let jitter_timing_box = Box::new(Orientation::Horizontal, 8);
-        jitter_timing_box.set_margin_start(12);
-        jitter_timing_box.set_margin_end(12);
-        jitter_timing_box.set_margin_top(4);
-        jitter_timing_box.set_margin_bottom(4);
-
-        let jitter_min_adj = Adjustment::new(5.0, 1.0, 100.0, 1.0, 5.0, 0.0);
-        let jitter_min_row = SpinRow::new(Some(&jitter_min_adj), 1.0, 0);
-        jitter_min_row.set_title("Min (ms)");
-        jitter_min_row.set_hexpand(true);
-
-        let jitter_max_adj = Adjustment::new(20.0, 1.0, 200.0, 1.0, 5.0, 0.0);
-        let jitter_max_row = SpinRow::new(Some(&jitter_max_adj), 1.0, 0);
-        jitter_max_row.set_title("Max (ms)");
-        jitter_max_row.set_hexpand(true);
 
         settings_group.add(&cps_spin);
         settings_group.add(&mode_row);
@@ -205,11 +194,6 @@ impl MainWindow {
         settings_group.add(&hotkey_row);
         settings_group.add(&jitter_row_box);
 
-        let jitter_detail_group = PreferencesGroup::new();
-        jitter_detail_group.add(&jitter_min_row);
-        jitter_detail_group.add(&jitter_max_row);
-
-        // ── Control Button ──
         let start_stop_btn = Button::with_label("Start Clicking");
         start_stop_btn.add_css_class("suggested-action");
         start_stop_btn.add_css_class("pill");
@@ -220,12 +204,23 @@ impl MainWindow {
         content.append(&status_box);
         content.append(&preset_box);
         content.append(&settings_group);
-        content.append(&jitter_detail_group);
         content.append(&start_stop_btn);
+
+        let clamp = libadwaita::Clamp::builder()
+            .maximum_size(480)
+            .tightening_threshold(420)
+            .child(&content)
+            .build();
+
+        let scrolled = ScrolledWindow::builder()
+            .hscrollbar_policy(PolicyType::Never)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .child(&clamp)
+            .build();
 
         // Wrap content in toast overlay for notifications
         let toast_overlay = libadwaita::ToastOverlay::new();
-        toast_overlay.set_child(Some(&content));
+        toast_overlay.set_child(Some(&scrolled));
 
         window.set_child(Some(&toast_overlay));
 
@@ -241,12 +236,11 @@ impl MainWindow {
             status_label,
             status_icon: status_icon_label,
             live_cps_label,
+            total_clicks_label,
             mode_row,
             burst_row,
             button_row,
             jitter_switch,
-            jitter_min_row,
-            jitter_max_row,
             hotkey_btn,
             hotkey_label,
             toast_overlay,

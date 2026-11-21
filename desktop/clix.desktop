@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Clix
+Comment=Linux auto-clicker with kernel-level uinput injection
+Exec=clix
+Icon=clix
+Terminal=false
+Type=Application
+Categories=Utility;Accessibility;
+Keywords=autoclicker;mouse;click;automation;
+StartupNotify=true

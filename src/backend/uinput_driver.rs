@@ -4,7 +4,7 @@ use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 
-use libc::{input_event, timeval, INPUT_PROP_POINTER};
+use libc::{INPUT_PROP_POINTER, input_event, timeval};
 
 const EV_KEY: u32 = 0x01;
 const EV_REL: u32 = 0x02;
@@ -13,12 +13,12 @@ const SYN_REPORT: u16 = 0;
 use thiserror::Error;
 
 // uinput ioctl numbers (arch-independent)
-const UI_DEV_CREATE: u64 = 0x5501;
-const UI_DEV_DESTROY: u64 = 0x5502;
-const UI_SET_EVBIT: u64 = 0x40045564;
-const UI_SET_KEYBIT: u64 = 0x40045565;
-const UI_SET_RELBIT: u64 = 0x40045566;
-const UI_SET_PROPBIT: u64 = 0x4004556d;
+const UI_DEV_CREATE: libc::Ioctl = 0x5501;
+const UI_DEV_DESTROY: libc::Ioctl = 0x5502;
+const UI_SET_EVBIT: libc::Ioctl = 0x40045564;
+const UI_SET_KEYBIT: libc::Ioctl = 0x40045565;
+const UI_SET_RELBIT: libc::Ioctl = 0x40045566;
+const UI_SET_PROPBIT: libc::Ioctl = 0x4004556d;
 
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
@@ -122,7 +122,7 @@ impl UInputDriver {
                 std::mem::size_of::<uinput_user_dev>(),
             )
         };
-        nix::unistd::write(&self.fd, dev_bytes).map_err(|e| UInputError::Write(e.into()))?;
+        write_all_bytes(&self.fd, dev_bytes).map_err(UInputError::Write)?;
 
         // UI_DEV_CREATE takes no argument
         if unsafe { libc::ioctl(fd, UI_DEV_CREATE, 0) } < 0 {
@@ -147,19 +147,19 @@ impl UInputDriver {
             )
         };
 
-        match nix::unistd::write(&self.fd, bytes) {
-            Ok(_) => Ok(()),
+        match write_all_bytes(&self.fd, bytes) {
+            Ok(()) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
                 self.last_error = Some(msg);
                 self.active = false;
-                Err(UInputError::Write(e.into()))
+                Err(UInputError::Write(e))
             }
         }
     }
 
     pub fn syn_report(&mut self) -> Result<(), UInputError> {
-        self.write_event(make_event(EV_SYN as u16, SYN_REPORT as u16, 0))
+        self.write_event(make_event(EV_SYN as u16, SYN_REPORT, 0))
     }
 }
 
@@ -176,7 +176,6 @@ impl Drop for UInputDriver {
 fn fd_raw(file: &std::fs::File) -> RawFd {
     file.as_raw_fd()
 }
-
 
 fn open_uinput() -> Result<std::fs::File, UInputError> {
     for path in ["/dev/uinput", "/dev/input/uinput"] {
@@ -195,9 +194,26 @@ fn open_uinput() -> Result<std::fs::File, UInputError> {
         .map_err(UInputError::Open)
 }
 
-fn ioctl_set_bit(fd: RawFd, request: u64, bit: u64) -> Result<(), UInputError> {
+fn ioctl_set_bit(fd: RawFd, request: libc::Ioctl, bit: libc::c_ulong) -> Result<(), UInputError> {
     if unsafe { libc::ioctl(fd, request, bit) } < 0 {
         return Err(UInputError::Ioctl(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn write_all_bytes(fd: &std::fs::File, mut data: &[u8]) -> io::Result<()> {
+    while !data.is_empty() {
+        match nix::unistd::write(fd, data) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            Ok(n) => data = &data[n..],
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }

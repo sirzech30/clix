@@ -2,10 +2,9 @@
 default = 20
 
 [click]
+mode = "toggle"
 button = "left"
 jitter_enabled = false
-jitter_min_ms = 5
-jitter_max_ms = 20
 burst_count = 10
 
 [hotkey]

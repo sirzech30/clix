@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use super::uinput_driver::{
-    make_event, UInputDriver, UInputError, EV_KEY_TYPE, EV_REL_TYPE, KEY_BTN_LEFT, KEY_BTN_RIGHT,
-    REL_X_CODE, REL_Y_CODE,
+    EV_KEY_TYPE, EV_REL_TYPE, KEY_BTN_LEFT, KEY_BTN_RIGHT, REL_X_CODE, REL_Y_CODE, UInputDriver,
+    UInputError, make_event,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +34,34 @@ impl MouseButton {
     }
 }
 
+/// Abstraction over a mouse click output device, enabling unit testing without `/dev/uinput`.
+pub trait ClickDevice: Send {
+    fn is_active(&self) -> bool;
+    fn last_error(&self) -> Option<&str>;
+    fn recreate(&mut self) -> Result<(), UInputError>;
+    fn click(&mut self, button: MouseButton) -> Result<(), UInputError>;
+}
+
 pub struct VirtualMouse {
     driver: UInputDriver,
+}
+
+impl ClickDevice for VirtualMouse {
+    fn is_active(&self) -> bool {
+        self.driver.is_active()
+    }
+
+    fn last_error(&self) -> Option<&str> {
+        self.driver.last_error()
+    }
+
+    fn recreate(&mut self) -> Result<(), UInputError> {
+        self.driver.recreate()
+    }
+
+    fn click(&mut self, button: MouseButton) -> Result<(), UInputError> {
+        VirtualMouse::click(self, button)
+    }
 }
 
 impl VirtualMouse {

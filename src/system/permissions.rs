@@ -30,11 +30,7 @@ pub fn check_permissions() -> PermissionStatus {
 fn can_access_uinput() -> bool {
     for path in ["/dev/uinput", "/dev/input/uinput"] {
         if Path::new(path).exists() {
-            return OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-                .is_ok();
+            return OpenOptions::new().read(true).write(true).open(path).is_ok();
         }
     }
     false
@@ -42,24 +38,35 @@ fn can_access_uinput() -> bool {
 
 fn is_in_input_group() -> bool {
     let uid = nix::unistd::getuid();
-    if let Ok(Some(group)) = nix::unistd::Group::from_name("input") {
-        if let Ok(Some(user)) = nix::unistd::User::from_uid(uid) {
-            if user.gid == group.gid {
-                return true;
-            }
+    let Ok(Some(group)) = nix::unistd::Group::from_name("input") else {
+        return false;
+    };
+
+    if let Ok(Some(user)) = nix::unistd::User::from_uid(uid) {
+        if user.gid == group.gid {
+            return true;
+        }
+        if group.mem.iter().any(|m| m == &user.name) {
+            return true;
         }
     }
 
-    std::fs::read_to_string("/etc/group")
-        .map(|content| {
-            let uid_str = uid.as_raw().to_string();
-            content.lines().any(|line| {
-                let mut parts = line.split(':');
-                let name = parts.next().unwrap_or_default();
-                let _gid = parts.next();
-                let members = parts.next().unwrap_or_default();
-                name == "input" && members.split(',').any(|m| m == uid_str)
-            })
-        })
-        .unwrap_or(false)
+    if let Ok(groups) = nix::unistd::getgroups()
+        && groups.contains(&group.gid)
+    {
+        return true;
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_permissions_returns_consistent_message() {
+        let status = check_permissions();
+        assert!(!status.message.is_empty());
+    }
 }

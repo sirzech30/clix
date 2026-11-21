@@ -1,16 +1,25 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use thiserror::Error;
 
-use crate::backend::{MouseButton, VirtualMouse};
+#[derive(Debug, Error)]
+pub enum EngineError {
+    #[error("failed to spawn click engine thread: {0}")]
+    ThreadSpawn(#[from] std::io::Error),
+}
+
+use crate::backend::{ClickDevice, MouseButton, VirtualMouse};
 use crate::core::scheduler::{ClickMode, RunState, Scheduler};
 use crate::core::timing::{TimingConfig, TimingEngine};
 use crate::system::hotkey::HotkeyEvent;
 
 const MIN_STATS_INTERVAL: Duration = Duration::from_millis(16);
+const SPIN_TAIL_THRESHOLD: Duration = Duration::from_millis(2);
 
 #[derive(Debug, Clone)]
 pub enum EngineCommand {
@@ -21,12 +30,7 @@ pub enum EngineCommand {
     SetMode(ClickMode),
     SetButton(MouseButton),
     SetBurstCount(u32),
-    SetJitter {
-        enabled: bool,
-        min_ms: u32,
-        max_ms: u32,
-    },
-    SetSmoothing(bool),
+    SetJitter(bool),
     AttachHotkey(Receiver<HotkeyEvent>),
     RecreateDevice,
     Shutdown,
@@ -51,7 +55,28 @@ pub struct ClickEngine {
 }
 
 impl ClickEngine {
-    pub fn start(initial: EngineSettings) -> Result<Self, String> {
+    pub fn start(initial: EngineSettings) -> Result<Self, EngineError> {
+        Self::start_with_factory(initial, || {
+            VirtualMouse::new()
+                .map(|m| Box::new(m) as Box<dyn ClickDevice>)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn start_with_device<D: ClickDevice + 'static>(
+        initial: EngineSettings,
+        device: D,
+    ) -> Result<Self, EngineError> {
+        Self::start_with_factory(
+            initial,
+            move || Ok(Box::new(device) as Box<dyn ClickDevice>),
+        )
+    }
+
+    fn start_with_factory<F>(initial: EngineSettings, factory: F) -> Result<Self, EngineError>
+    where
+        F: FnOnce() -> Result<Box<dyn ClickDevice>, String> + Send + 'static,
+    {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let (stats_tx, stats_rx) = crossbeam_channel::unbounded();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -59,8 +84,7 @@ impl ClickEngine {
 
         let handle = thread::Builder::new()
             .name("click-engine".into())
-            .spawn(move || engine_loop(cmd_rx, stats_tx, shutdown_flag, initial))
-            .map_err(|e| e.to_string())?;
+            .spawn(move || engine_loop(cmd_rx, stats_tx, shutdown_flag, initial, factory))?;
 
         Ok(Self {
             cmd_tx,
@@ -104,18 +128,18 @@ pub struct EngineSettings {
     pub button: MouseButton,
     pub burst_count: u32,
     pub jitter_enabled: bool,
-    pub jitter_min_ms: u32,
-    pub jitter_max_ms: u32,
-    pub smoothing_enabled: bool,
 }
 
-fn engine_loop(
+fn engine_loop<F>(
     cmd_rx: Receiver<EngineCommand>,
     stats_tx: Sender<EngineStats>,
     shutdown: Arc<AtomicBool>,
     mut settings: EngineSettings,
-) {
-    let mut mouse = match VirtualMouse::new() {
+    device_factory: F,
+) where
+    F: FnOnce() -> Result<Box<dyn ClickDevice>, String>,
+{
+    let mut mouse = match device_factory() {
         Ok(m) => m,
         Err(e) => {
             let _ = stats_tx.send(EngineStats {
@@ -124,7 +148,7 @@ fn engine_loop(
                 live_cps: 0.0,
                 target_cps: settings.cps,
                 device_active: false,
-                device_error: Some(e.to_string()),
+                device_error: Some(e),
                 mode: settings.mode,
             });
             return;
@@ -134,8 +158,7 @@ fn engine_loop(
     let mut scheduler = Scheduler::new(settings.mode, settings.burst_count);
     let mut timing = TimingEngine::new(timing_config(&settings));
     let mut total_clicks: u64 = 0;
-    let mut click_window: [Option<Instant>; 128] = [None; 128];
-    let mut click_window_idx: usize = 0;
+    let mut click_window: VecDeque<Instant> = VecDeque::with_capacity(256);
     let mut deadline: Option<Instant> = None;
     let mut hotkey_rx: Option<Receiver<HotkeyEvent>> = None;
     let mut last_stats_emit = Instant::now() - MIN_STATS_INTERVAL;
@@ -143,10 +166,10 @@ fn engine_loop(
     emit_stats(
         &stats_tx,
         &scheduler,
-        &mouse,
+        mouse.as_ref(),
         &settings,
         total_clicks,
-        &click_window,
+        &mut click_window,
         &mut last_stats_emit,
     );
 
@@ -165,10 +188,10 @@ fn engine_loop(
                 emit_stats(
                     &stats_tx,
                     &scheduler,
-                    &mouse,
+                    mouse.as_ref(),
                     &settings,
                     total_clicks,
-                    &click_window,
+                    &mut click_window,
                     &mut last_stats_emit,
                 );
             }
@@ -190,7 +213,7 @@ fn engine_loop(
                     &mut settings,
                     &mut scheduler,
                     &mut timing,
-                    &mut mouse,
+                    mouse.as_mut(),
                     &mut deadline,
                     &mut hotkey_rx,
                 );
@@ -198,10 +221,10 @@ fn engine_loop(
                     emit_stats(
                         &stats_tx,
                         &scheduler,
-                        &mouse,
+                        mouse.as_ref(),
                         &settings,
                         total_clicks,
-                        &click_window,
+                        &mut click_window,
                         &mut last_stats_emit,
                     );
                     continue;
@@ -212,8 +235,7 @@ fn engine_loop(
                     Ok(()) => {
                         if scheduler.on_click_fired() {
                             total_clicks += 1;
-                            click_window[click_window_idx] = Some(Instant::now());
-                            click_window_idx = (click_window_idx + 1) % click_window.len();
+                            click_window.push_back(Instant::now());
                         }
                     }
                     Err(_) => {
@@ -237,10 +259,10 @@ fn engine_loop(
                 emit_stats(
                     &stats_tx,
                     &scheduler,
-                    &mouse,
+                    mouse.as_ref(),
                     &settings,
                     total_clicks,
-                    &click_window,
+                    &mut click_window,
                     &mut last_stats_emit,
                 );
             } else {
@@ -258,17 +280,17 @@ fn engine_loop(
                         &mut settings,
                         &mut scheduler,
                         &mut timing,
-                        &mut mouse,
+                        mouse.as_mut(),
                         &mut deadline,
                         &mut hotkey_rx,
                     );
                     emit_stats(
                         &stats_tx,
                         &scheduler,
-                        &mouse,
+                        mouse.as_ref(),
                         &settings,
                         total_clicks,
-                        &click_window,
+                        &mut click_window,
                         &mut last_stats_emit,
                     );
                 }
@@ -277,10 +299,10 @@ fn engine_loop(
                     emit_stats(
                         &stats_tx,
                         &scheduler,
-                        &mouse,
+                        mouse.as_ref(),
                         &settings,
                         total_clicks,
-                        &click_window,
+                        &mut click_window,
                         &mut last_stats_emit,
                     );
                 }
@@ -294,10 +316,7 @@ fn engine_loop(
 /// crossbeam-channel 0.5 internally uses `thread::park_timeout()` for blocking,
 /// but a stale park-permit bug causes it to spin at 100% CPU instead of sleeping.
 /// This function uses `thread::sleep()` which properly blocks on Linux.
-fn safe_recv_timeout<T>(
-    rx: &Receiver<T>,
-    timeout: Duration,
-) -> Result<T, RecvTimeoutError> {
+fn safe_recv_timeout<T>(rx: &Receiver<T>, timeout: Duration) -> Result<T, RecvTimeoutError> {
     let deadline = Instant::now() + timeout;
     loop {
         match rx.try_recv() {
@@ -318,13 +337,9 @@ fn safe_recv_timeout<T>(
     }
 }
 
-/// Wait until the given deadline using OS-level sleep.
-/// Uses `std::thread::sleep()` in chunks (max 50ms) for proper blocking (0% CPU),
-/// checking the shutdown flag between chunks for responsiveness.
-fn wait_until_deadline(
-    dl: Instant,
-    shutdown: &AtomicBool,
-) {
+/// Wait until the given deadline using OS-level sleep for coarse waits
+/// and a short spin-loop for the final sub-2ms tail to preserve high-CPS accuracy.
+fn wait_until_deadline(dl: Instant, shutdown: &AtomicBool) {
     loop {
         if shutdown.load(Ordering::SeqCst) {
             return;
@@ -333,8 +348,16 @@ fn wait_until_deadline(
         if remaining.is_zero() {
             return;
         }
-        let chunk = std::cmp::min(remaining, Duration::from_millis(50));
-        std::thread::sleep(chunk);
+        if remaining > SPIN_TAIL_THRESHOLD {
+            let sleep_for =
+                std::cmp::min(remaining - SPIN_TAIL_THRESHOLD, Duration::from_millis(50));
+            std::thread::sleep(sleep_for);
+        } else {
+            while !shutdown.load(Ordering::SeqCst) && Instant::now() < dl {
+                std::hint::spin_loop();
+            }
+            return;
+        }
     }
 }
 
@@ -343,7 +366,7 @@ fn drain_commands(
     settings: &mut EngineSettings,
     scheduler: &mut Scheduler,
     timing: &mut TimingEngine,
-    mouse: &mut VirtualMouse,
+    mouse: &mut dyn ClickDevice,
     deadline: &mut Option<Instant>,
     hotkey_rx: &mut Option<Receiver<HotkeyEvent>>,
 ) {
@@ -351,15 +374,7 @@ fn drain_commands(
         match cmd {
             EngineCommand::Shutdown => {} // handled by the main loop
             cmd => {
-                apply_command(
-                    cmd,
-                    settings,
-                    scheduler,
-                    timing,
-                    mouse,
-                    deadline,
-                    hotkey_rx,
-                );
+                apply_command(cmd, settings, scheduler, timing, mouse, deadline, hotkey_rx);
             }
         }
     }
@@ -370,7 +385,7 @@ fn apply_command(
     settings: &mut EngineSettings,
     scheduler: &mut Scheduler,
     timing: &mut TimingEngine,
-    mouse: &mut VirtualMouse,
+    mouse: &mut dyn ClickDevice,
     deadline: &mut Option<Instant>,
     hotkey_rx: &mut Option<Receiver<HotkeyEvent>>,
 ) {
@@ -412,18 +427,8 @@ fn apply_command(
             settings.burst_count = count;
             scheduler.set_burst_count(count);
         }
-        EngineCommand::SetJitter {
-            enabled,
-            min_ms,
-            max_ms,
-        } => {
+        EngineCommand::SetJitter(enabled) => {
             settings.jitter_enabled = enabled;
-            settings.jitter_min_ms = min_ms;
-            settings.jitter_max_ms = max_ms;
-            timing.set_config(timing_config(settings));
-        }
-        EngineCommand::SetSmoothing(enabled) => {
-            settings.smoothing_enabled = enabled;
             timing.set_config(timing_config(settings));
         }
         EngineCommand::AttachHotkey(rx) => {
@@ -441,28 +446,28 @@ fn timing_config(settings: &EngineSettings) -> TimingConfig {
     TimingConfig {
         cps: settings.cps,
         jitter_enabled: settings.jitter_enabled,
-        jitter_min_ms: settings.jitter_min_ms,
-        jitter_max_ms: settings.jitter_max_ms,
-        smoothing_enabled: settings.smoothing_enabled,
     }
 }
 
-fn compute_live_cps(window: &[Option<Instant>]) -> f64 {
+fn compute_live_cps(window: &mut VecDeque<Instant>) -> f64 {
     let cutoff = Instant::now() - Duration::from_secs(1);
-    window
-        .iter()
-        .filter_map(|t| *t)
-        .filter(|t| *t >= cutoff)
-        .count() as f64
+    while let Some(&front) = window.front() {
+        if front < cutoff {
+            window.pop_front();
+        } else {
+            break;
+        }
+    }
+    window.len() as f64
 }
 
 fn emit_stats(
     stats_tx: &Sender<EngineStats>,
     scheduler: &Scheduler,
-    mouse: &VirtualMouse,
+    mouse: &dyn ClickDevice,
     settings: &EngineSettings,
     total_clicks: u64,
-    click_window: &[Option<Instant>],
+    click_window: &mut VecDeque<Instant>,
     last_stats_emit: &mut Instant,
 ) {
     let now = Instant::now();
@@ -480,4 +485,66 @@ fn emit_stats(
         device_error: mouse.last_error().map(str::to_string),
         mode: settings.mode,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::uinput_driver::UInputError;
+    use std::sync::atomic::AtomicU64;
+
+    struct FakeDevice {
+        clicks: Arc<AtomicU64>,
+        active: bool,
+    }
+
+    impl ClickDevice for FakeDevice {
+        fn is_active(&self) -> bool {
+            self.active
+        }
+        fn last_error(&self) -> Option<&str> {
+            None
+        }
+        fn recreate(&mut self) -> Result<(), UInputError> {
+            self.active = true;
+            Ok(())
+        }
+        fn click(&mut self, _button: MouseButton) -> Result<(), UInputError> {
+            self.clicks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_click_engine_burst_with_jitter() {
+        let clicks = Arc::new(AtomicU64::new(0));
+        let device = FakeDevice {
+            clicks: Arc::clone(&clicks),
+            active: true,
+        };
+        let settings = EngineSettings {
+            cps: 1000,
+            mode: ClickMode::Burst,
+            button: MouseButton::Left,
+            burst_count: 5,
+            jitter_enabled: true,
+        };
+
+        let mut engine = ClickEngine::start_with_device(settings, device).unwrap();
+        engine.send(EngineCommand::Start);
+        thread::sleep(Duration::from_millis(80));
+        engine.shutdown();
+
+        assert_eq!(clicks.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn test_compute_live_cps_exceeds_128() {
+        let mut window = VecDeque::new();
+        let now = Instant::now();
+        for _ in 0..250 {
+            window.push_back(now);
+        }
+        assert_eq!(compute_live_cps(&mut window), 250.0);
+    }
 }

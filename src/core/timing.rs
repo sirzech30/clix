@@ -4,28 +4,20 @@ use std::time::{Duration, Instant};
 pub struct TimingConfig {
     pub cps: u32,
     pub jitter_enabled: bool,
-    pub jitter_min_ms: u32,
-    pub jitter_max_ms: u32,
-    pub smoothing_enabled: bool,
 }
 
 pub struct TimingEngine {
     config: TimingConfig,
-    sleeper: PreciseSleeper,
 }
 
 impl TimingEngine {
     pub fn new(config: TimingConfig) -> Self {
-        Self {
-            config,
-            sleeper: PreciseSleeper::new(),
-        }
+        Self { config }
     }
 
     pub fn set_config(&mut self, config: TimingConfig) {
         self.config = config;
     }
-
 
     /// Schedule the next click deadline relative to now
     pub fn schedule_next(&mut self) -> Instant {
@@ -52,24 +44,13 @@ impl TimingEngine {
     fn compute_interval(&self) -> Duration {
         let base_interval = interval_for_cps(self.config.cps);
         if self.config.jitter_enabled {
-            apply_jitter(
-                base_interval,
-                self.config.jitter_min_ms,
-                self.config.jitter_max_ms,
-            )
+            apply_jitter(base_interval)
         } else {
             base_interval
         }
     }
 
-    pub fn wait_for_next_click(&mut self) {
-        let interval = self.compute_interval();
-        self.sleeper.sleep(interval);
-    }
-
-    pub fn reset(&mut self) {
-        self.sleeper.reset();
-    }
+    pub fn reset(&mut self) {}
 }
 
 /// Calculate interval between clicks based on CPS
@@ -80,47 +61,18 @@ pub fn interval_for_cps(cps: u32) -> Duration {
     Duration::from_micros(1_000_000 / cps as u64)
 }
 
-/// Add random jitter to a base duration
-pub fn apply_jitter(base: Duration, min_ms: u32, max_ms: u32) -> Duration {
+/// Add ±15% random jitter to a base duration.
+pub fn apply_jitter(base: Duration) -> Duration {
     use rand::Rng;
+    let base_us = base.as_micros() as i64;
+    let delta = (base_us * 15) / 100;
+    if delta <= 0 {
+        return base;
+    }
     let mut rng = rand::thread_rng();
-    let jitter_ms = rng.gen_range(min_ms..=max_ms);
-    base.saturating_add(Duration::from_millis(jitter_ms as u64))
-}
-
-/// Precise sleep that compensates for drift
-pub struct PreciseSleeper {
-    last_tick: Instant,
-}
-
-impl PreciseSleeper {
-    pub fn new() -> Self {
-        Self {
-            last_tick: Instant::now(),
-        }
-    }
-
-    pub fn sleep(&mut self, target_interval: Duration) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_tick);
-
-        if elapsed < target_interval {
-            let sleep_duration = target_interval - elapsed;
-            std::thread::sleep(sleep_duration);
-        }
-
-        self.last_tick = Instant::now();
-    }
-
-    pub fn reset(&mut self) {
-        self.last_tick = Instant::now();
-    }
-}
-
-impl Default for PreciseSleeper {
-    fn default() -> Self {
-        Self::new()
-    }
+    let offset = rng.gen_range(-delta..=delta);
+    let jittered_us = (base_us + offset).max(1) as u64;
+    Duration::from_micros(jittered_us)
 }
 
 #[cfg(test)]
@@ -145,49 +97,20 @@ mod tests {
 
     #[test]
     fn test_apply_jitter_range() {
-        let base = Duration::from_millis(50);
-        let min_ms = 5;
-        let max_ms = 20;
+        let base = Duration::from_millis(100);
 
-        // Run multiple times to test randomness
         for _ in 0..100 {
-            let result = apply_jitter(base, min_ms, max_ms);
+            let result = apply_jitter(base);
             let result_ms = result.as_millis();
-
-            // Should be between base + min and base + max
-            assert!(result_ms >= 55, "result_ms={} should be >= 55", result_ms);
-            assert!(result_ms <= 70, "result_ms={} should be <= 70", result_ms);
+            assert!((85..=115).contains(&result_ms), "result_ms={result_ms}");
         }
     }
 
     #[test]
-    fn test_apply_jitter_zero_range() {
-        let base = Duration::from_millis(50);
-        let result = apply_jitter(base, 0, 0);
-
-        // With 0 jitter, should return base duration
+    fn test_apply_jitter_sub_millisecond_safe() {
+        let base = Duration::from_micros(5);
+        let result = apply_jitter(base);
         assert_eq!(result, base);
-    }
-
-    #[test]
-    fn test_precise_sleeper_reset() {
-        let mut sleeper = PreciseSleeper::new();
-        let initial_tick = sleeper.last_tick;
-
-        std::thread::sleep(Duration::from_millis(10));
-        sleeper.reset();
-
-        assert!(sleeper.last_tick > initial_tick);
-    }
-
-    #[test]
-    fn test_precise_sleeper_default() {
-        let sleeper = PreciseSleeper::default();
-        let now = Instant::now();
-
-        // Should be initialized to approximately now
-        let diff = now.duration_since(sleeper.last_tick);
-        assert!(diff < Duration::from_millis(10));
     }
 
     #[test]
@@ -195,9 +118,6 @@ mod tests {
         let config = TimingConfig {
             cps: 100,
             jitter_enabled: false,
-            jitter_min_ms: 0,
-            jitter_max_ms: 0,
-            smoothing_enabled: false,
         };
         let mut timing = TimingEngine::new(config);
 
@@ -212,6 +132,11 @@ mod tests {
         } else {
             expected - next
         };
-        assert!(diff < Duration::from_millis(1), "next={:?}, expected={:?}", next, expected);
+        assert!(
+            diff < Duration::from_millis(1),
+            "next={:?}, expected={:?}",
+            next,
+            expected
+        );
     }
 }
