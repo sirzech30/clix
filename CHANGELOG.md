@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.1]
 
 ### Fixed
 - Replaced min/max jitter inputs with a single Random Jitter toggle (±15% proportional variance).
@@ -24,5 +24,5 @@ All notable changes to this project will be documented in this file.
 - Added `desktop/clix.desktop`, `total_clicks` counter in the UI, and Wayland-compatible `PassEnvironment` in `systemd/clix.service`.
 - Added GitHub Actions CI & release workflows, Dependabot config, `SECURITY.md`, `CONTRIBUTING.md`, and `.editorconfig`.
 
-## [0.1.0] - 2026-02-01
+## [0.1.0]
 - Initial release with GTK4/libadwaita UI, `/dev/uinput` mouse injection, and global hotkeys.
